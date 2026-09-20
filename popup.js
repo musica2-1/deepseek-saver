@@ -90,7 +90,7 @@ async function copy(btn, text) {
     await navigator.clipboard.writeText(text);
     btn.textContent = "Copied ✓";
   } catch (e) {
-    btn.textContent = "Copy failed";
+    btn.textContent = "Couldn't copy";
   }
   setTimeout(function () { btn.textContent = old; }, 1300);
 }
@@ -176,14 +176,14 @@ function messageCard(rec) {
   const a = el("div", "a");
   const head = el("div", "a-head");
   head.appendChild(el("span", "who ai", "DeepSeek"));
-  if (!rec.done) head.appendChild(el("span", "live", "receiving"));
+  if (!rec.done) head.appendChild(el("span", "live", "still typing…"));
   head.appendChild(el("span", "time", formatWhen(rec.startedAt)));
   a.appendChild(head);
 
   if (answer) {
     a.appendChild(el("p", "text", answer));
   } else {
-    a.appendChild(el("p", "text placeholder", rec.done ? "No reply text." : "Thinking…"));
+    a.appendChild(el("p", "text placeholder", rec.done ? "No reply text here." : "Thinking…"));
   }
 
   if (long) {
@@ -195,7 +195,7 @@ function messageCard(rec) {
   }
 
   if (rec.flagged) {
-    a.appendChild(el("div", "notice", "The site may have removed this reply from the screen. The full text is still saved here."));
+    a.appendChild(el("div", "notice", "Looks like the site trimmed this reply from the screen — no worries, the full text is safe right here."));
   }
 
   if (think) {
@@ -260,7 +260,7 @@ function render() {
   if (!valid.length) {
     list.appendChild(emptyState(
       "Nothing saved yet",
-      "Send a message on chat.deepseek.com. The full reply shows up here, even if the site deletes it later."
+      "Once you chat on chat.deepseek.com, replies will show up here automatically — even the ones the site later deletes."
     ));
     return;
   }
@@ -292,8 +292,8 @@ function render() {
 
   if (!shown) {
     list.appendChild(emptyState(
-      query ? "Nothing found" : "No flagged replies",
-      query ? "Try another word from the question or the reply." : "When the site triggers a filter, the reply shows up here."
+      query ? "No matches" : "No flagged replies",
+      query ? "Try a different word from the question or the reply." : "If the site ever filters a reply, you'll find it here."
     ));
   }
   sc.scrollTop = y;
