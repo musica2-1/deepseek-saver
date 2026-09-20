@@ -1,0 +1,26 @@
+{
+  "manifest_version": 2,
+  "name": "DeepSeek Saver",
+  "version": "1.1.0",
+  "description": "Saves the text of DeepSeek replies locally as they arrive, before the site can remove anything from the screen.",
+  "permissions": [
+    "webRequest",
+    "webRequestBlocking",
+    "storage",
+    "unlimitedStorage",
+    "https://chat.deepseek.com/*"
+  ],
+  "background": {
+    "scripts": ["parser.js", "background.js"],
+    "persistent": true
+  },
+  "browser_action": {
+    "default_title": "DeepSeek Saver",
+    "default_popup": "popup.html"
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "deepseek-saver@local"
+    }
+  }
+}
