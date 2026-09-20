@@ -1,341 +1,208 @@
-const $ = function (s) { return document.querySelector(s); };
-const isTab = /[?&]tab=1/.test(location.search);
-if (isTab) {
-  document.body.classList.add("tab");
-  $("#open-tab").hidden = true;
-}
-
-let records = [];
-let query = "";
-let filter = "all";
-const expanded = new Set();
-const thinkOpen = new Set();
-
-/* ---------- helpers ---------- */
-
-function norm(s) {
-  return (s || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-}
-
-function textOf(rec, type) {
-  return rec.fragments
-    .filter(function (f) { return f.type === type; })
-    .map(function (f) { return f.content; })
-    .join("");
-}
-function answerOf(rec) { return textOf(rec, "RESPONSE"); }
-function thinkOf(rec) { return textOf(rec, "THINK"); }
-function promptOf(rec) { return rec.prompt || ""; }
-
-function formatWhen(ts) {
-  const d = new Date(ts);
-  const now = new Date();
-  const hm = d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
-  const day = function (x) { return new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime(); };
-  const diff = Math.round((day(now) - day(d)) / 86400000);
-  if (diff === 0) return "Today, " + hm;
-  if (diff === 1) return "Yesterday, " + hm;
-  return d.toLocaleDateString("en-US", { month: "short", day: "numeric" }) + ", " + hm;
-}
-
-function plural(n, one, many) { return n + " " + (n === 1 ? one : many); }
-
-function slug(s) {
-  return (s || "").toLowerCase()
-    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
-    .replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40) || "conversation";
-}
-
-function el(tag, cls, text) {
-  const e = document.createElement(tag);
-  if (cls) e.className = cls;
-  if (text !== undefined) e.textContent = text;
-  return e;
-}
-
-function button(label, cls, onClick) {
-  const b = el("button", cls, label);
-  b.type = "button";
-  if (onClick) b.addEventListener("click", function () { onClick(b); });
-  return b;
-}
-
-// Button that asks for a second click before confirming (avoids accidental deletes)
-function armable(b, label, onConfirm) {
-  let timer = null;
-  b.addEventListener("click", function () {
-    if (b.dataset.armed) {
-      clearTimeout(timer);
-      delete b.dataset.armed;
-      b.classList.remove("armed");
-      b.textContent = label;
-      onConfirm();
-      return;
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>DeepSeek Saver</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #f4f5f2;
+    --surface: #ffffff;
+    --surface-2: #edefeb;
+    --ink: #20241f;
+    --muted: #767f76;
+    --line: #dde1da;
+    --accent: #4a6a80;
+    --accent-soft: #dde6ea;
+    --accent-ink: #34505f;
+    --on-accent: #ffffff;
+    --you-bg: #eef1ec;
+    --warn: #7a4300;
+    --warn-bg: #fbead0;
+    --warn-line: #d29f3c;
+    --danger: #a8493a;
+    --danger-soft: #f1e0da;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14181a;
+      --surface: #1c2124;
+      --surface-2: #21282b;
+      --ink: #e6ebe7;
+      --muted: #94a099;
+      --line: #2c3538;
+      --accent: #7fabc2;
+      --accent-soft: #1c2b32;
+      --accent-ink: #a0c6d9;
+      --on-accent: #0d1417;
+      --you-bg: #1f2729;
+      --warn: #f0b558;
+      --warn-bg: #362809;
+      --warn-line: #a87a2c;
+      --danger: #e2846f;
+      --danger-soft: #33201a;
     }
-    b.dataset.armed = "1";
-    b.classList.add("armed");
-    b.textContent = "Click again to delete";
-    timer = setTimeout(function () {
-      delete b.dataset.armed;
-      b.classList.remove("armed");
-      b.textContent = label;
-    }, 3000);
-  });
-  return b;
-}
-
-async function copy(btn, text) {
-  const old = btn.textContent;
-  try {
-    await navigator.clipboard.writeText(text);
-    btn.textContent = "Copied ✓";
-  } catch (e) {
-    btn.textContent = "Couldn't copy";
-  }
-  setTimeout(function () { btn.textContent = old; }, 1300);
-}
-
-function download(name, text) {
-  const url = URL.createObjectURL(new Blob([text], { type: "text/markdown;charset=utf-8" }));
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = name;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(function () { URL.revokeObjectURL(url); }, 2000);
-}
-
-/* ---------- exported text ---------- */
-
-function messageMd(rec) {
-  let md = "";
-  if (promptOf(rec)) md += "### You\n\n" + promptOf(rec) + "\n\n";
-  const think = thinkOf(rec);
-  md += "### DeepSeek\n\n" + answerOf(rec) + "\n";
-  if (think) md += "\n<details><summary>Reasoning</summary>\n\n" + think + "\n\n</details>\n";
-  return md;
-}
-
-function groupMd(g) {
-  let md = "# " + g.title + "\n\n";
-  g.recs.forEach(function (r) {
-    md += "_" + new Date(r.startedAt).toLocaleString("en-US") + "_\n\n" + messageMd(r) + "\n---\n\n";
-  });
-  return md;
-}
-
-/* ---------- grouping and filtering ---------- */
-
-function buildGroups(list) {
-  const map = new Map();
-  list.forEach(function (r) {
-    const key = r.sessionId || r.id;
-    if (!map.has(key)) map.set(key, []);
-    map.get(key).push(r);
-  });
-  const groups = [];
-  map.forEach(function (recs, key) {
-    recs.sort(function (a, b) { return a.startedAt - b.startedAt; });
-    let title = "";
-    recs.forEach(function (r) { if (!title && r.title) title = r.title; });
-    if (!title) {
-      const p = promptOf(recs[0]).replace(/\s+/g, " ").trim();
-      title = p ? (p.length > 60 ? p.slice(0, 60) + "…" : p) : "Untitled conversation";
-    }
-    groups.push({
-      key: key,
-      recs: recs,
-      title: title,
-      updatedAt: Math.max.apply(null, recs.map(function (r) { return r.updatedAt || r.startedAt; })),
-    });
-  });
-  groups.sort(function (a, b) { return b.updatedAt - a.updatedAt; });
-  return groups;
-}
-
-/* ---------- rendering ---------- */
-
-function messageCard(rec) {
-  const answer = answerOf(rec);
-  const prompt = promptOf(rec);
-  const think = thinkOf(rec);
-  const isOpen = expanded.has(rec.id);
-  const isLong = function (t) { return t.length > 320 || t.split("\n").length > 5; };
-  const long = isLong(answer) || isLong(prompt);
-
-  const card = el("article", "msg" + (rec.flagged ? " flagged" : "") + (long && !isOpen ? " clamp" : ""));
-
-  if (prompt) {
-    const q = el("div", "q");
-    q.appendChild(el("div", "who", "You"));
-    q.appendChild(el("p", "text", prompt));
-    card.appendChild(q);
   }
 
-  const a = el("div", "a");
-  const head = el("div", "a-head");
-  head.appendChild(el("span", "who ai", "DeepSeek"));
-  if (!rec.done) head.appendChild(el("span", "live", "still typing…"));
-  head.appendChild(el("span", "time", formatWhen(rec.startedAt)));
-  a.appendChild(head);
-
-  if (answer) {
-    a.appendChild(el("p", "text", answer));
-  } else {
-    a.appendChild(el("p", "text placeholder", rec.done ? "No reply text here." : "Thinking…"));
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    width: 470px;
+    max-height: 600px;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg);
+    color: var(--ink);
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   }
+  body.tab { width: auto; max-height: none; height: 100vh; font-size: 15px; }
+  .wrap { width: 100%; max-width: 860px; margin: 0 auto; padding: 0 14px; }
 
-  if (long) {
-    const more = button(isOpen ? "Show less" : "Show all", "more", function () {
-      if (expanded.has(rec.id)) expanded.delete(rec.id); else expanded.add(rec.id);
-      render();
-    });
-    a.appendChild(more);
+  /* Header */
+  header { background: var(--surface); border-bottom: 1px solid var(--line); padding: 13px 0 11px; }
+  .bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 11px; }
+  h1 {
+    font-family: ui-serif, Georgia, "Iowan Old Style", "Palatino Linotype", serif;
+    font-size: 17px; font-weight: 600; margin: 0; color: var(--ink);
   }
+  .bar-actions { display: flex; gap: 2px; }
 
-  if (rec.flagged) {
-    a.appendChild(el("div", "notice", "Looks like the site trimmed this reply from the screen — no worries, the full text is safe right here."));
+  #q {
+    width: 100%;
+    padding: 8px 10px 8px 34px;
+    font: inherit;
+    color: var(--ink);
+    background: var(--surface-2) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23767f76' stroke-width='2.2' stroke-linecap='round'%3E%3Ccircle cx='11' cy='11' r='7'/%3E%3Cpath d='m20 20-3.5-3.5'/%3E%3C/svg%3E") no-repeat 11px 50%;
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    transition: border-color .15s ease, background .15s ease;
   }
+  #q::placeholder { color: var(--muted); }
+  #q:focus { outline: none; border-color: var(--accent); background: var(--surface); }
 
-  if (think) {
-    const d = el("details", "think");
-    d.open = thinkOpen.has(rec.id);
-    d.addEventListener("toggle", function () {
-      if (d.open) thinkOpen.add(rec.id); else thinkOpen.delete(rec.id);
-    });
-    d.appendChild(el("summary", null, "Show reasoning"));
-    d.appendChild(el("div", "think-body", think));
-    a.appendChild(d);
+  .chips { display: flex; gap: 6px; margin-top: 10px; }
+  .chip {
+    font: inherit; font-size: 13px;
+    padding: 3px 12px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: transparent;
+    color: var(--ink);
+    cursor: pointer;
+    transition: background .15s ease, border-color .15s ease, color .15s ease;
   }
-  card.appendChild(a);
+  .chip:hover { border-color: var(--accent); }
+  .chip .n { color: var(--muted); margin-left: 4px; }
+  .chip[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+  .chip[aria-pressed="true"] .n { color: var(--on-accent); opacity: 0.8; }
 
-  const actions = el("div", "actions");
-  actions.appendChild(button("Copy reply", "btn primary", function (b) { copy(b, answer); }));
-  if (prompt) {
-    actions.appendChild(button("Copy all", "btn", function (b) {
-      copy(b, "You:\n" + prompt + "\n\nDeepSeek:\n" + answer);
-    }));
+  /* Buttons */
+  button { font: inherit; cursor: pointer; }
+  button:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+  .ghost {
+    background: none; border: 0; padding: 5px 10px; border-radius: 7px;
+    color: var(--accent-ink); font-size: 13px;
+    transition: background .15s ease;
   }
-  actions.appendChild(button("Download .md", "btn", function () {
-    download(slug(prompt || rec.title) + "-" + rec.startedAt + ".md", messageMd(rec));
-  }));
-  actions.appendChild(button("Technical log", "btn quiet", function (b) {
-    copy(b, JSON.stringify({
-      status: rec.status, flagged: rec.flagged, notes: rec.notes,
-      request_fields: rec.reqKeys || null,
-      prompt_captured: !!prompt, last_lines: rec.tail,
-    }, null, 2));
-  }));
-  const del = button("Delete", "btn danger");
-  armable(del, "Delete", function () {
-    browser.runtime.sendMessage({ cmd: "delete", id: rec.id });
-  });
-  actions.appendChild(del);
-  card.appendChild(actions);
-
-  return card;
-}
-
-function emptyState(title, text) {
-  const d = el("div", "empty");
-  d.appendChild(el("strong", null, title));
-  d.appendChild(document.createTextNode(text));
-  return d;
-}
-
-function render() {
-  const sc = $("#scroll");
-  const y = sc.scrollTop;
-  const list = $("#list");
-  list.textContent = "";
-
-  const valid = records.filter(function (r) { return r.fragments && r.fragments.length; });
-  $("#n-all").textContent = valid.length;
-  $("#n-flagged").textContent = valid.filter(function (r) { return r.flagged; }).length;
-  document.querySelectorAll(".chip").forEach(function (c) {
-    c.setAttribute("aria-pressed", String(c.dataset.f === filter));
-  });
-
-  if (!valid.length) {
-    list.appendChild(emptyState(
-      "Nothing saved yet",
-      "Once you chat on chat.deepseek.com, replies will show up here automatically — even the ones the site later deletes."
-    ));
-    return;
+  .ghost:hover { background: var(--accent-soft); }
+  .ghost.danger { color: var(--danger); }
+  .ghost.danger:hover { background: var(--danger-soft); }
+  .btn {
+    padding: 5px 12px; font-size: 13px;
+    border: 1px solid var(--line); border-radius: 8px;
+    background: var(--surface); color: var(--ink);
+    transition: background .15s ease, border-color .15s ease, color .15s ease, transform .1s ease;
   }
+  .btn:hover { border-color: var(--accent); color: var(--accent-ink); background: var(--accent-soft); }
+  .btn:active { transform: scale(.97); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600; }
+  .btn.primary:hover { background: var(--accent-ink); border-color: var(--accent-ink); color: var(--on-accent); }
+  .btn.quiet { border-color: transparent; background: none; color: var(--muted); }
+  .btn.quiet:hover { color: var(--accent-ink); background: var(--accent-soft); }
+  .btn.danger { border-color: transparent; background: none; color: var(--muted); margin-left: auto; }
+  .btn.danger:hover, .armed { color: var(--danger) !important; border-color: transparent !important; background: var(--danger-soft) !important; }
 
-  let shown = 0;
-  buildGroups(valid).forEach(function (g) {
-    const titleHit = query && norm(g.title).indexOf(query) !== -1;
-    const msgs = g.recs.filter(function (r) {
-      if (filter === "flagged" && !r.flagged) return false;
-      if (!query || titleHit) return true;
-      return norm(promptOf(r) + " " + answerOf(r)).indexOf(query) !== -1;
-    });
-    if (!msgs.length) return;
-    shown += msgs.length;
+  /* List */
+  #scroll { flex: 1; min-height: 0; overflow-y: auto; }
+  #list { padding-top: 8px; padding-bottom: 16px; }
 
-    const group = el("section", "group");
-    const head = el("div", "g-head");
-    head.appendChild(el("h2", "g-title", g.title));
-    const side = el("div", "g-side");
-    side.appendChild(document.createTextNode(plural(msgs.length, "message", "messages") + " · " + formatWhen(g.updatedAt)));
-    side.appendChild(button("Download", "btn quiet", function () {
-      download(slug(g.title) + ".md", groupMd({ title: g.title, recs: msgs }));
-    }));
-    head.appendChild(side);
-    group.appendChild(head);
-    msgs.forEach(function (r) { group.appendChild(messageCard(r)); });
-    list.appendChild(group);
-  });
+  .group { margin-top: 16px; }
+  .g-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 0 2px 7px; }
+  .g-title { font-size: 13.5px; font-weight: 650; margin: 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .g-side { display: flex; align-items: center; gap: 4px; flex-shrink: 0; color: var(--muted); font-size: 12px; }
+  .g-side .btn { padding: 1px 8px; font-size: 12px; }
 
-  if (!shown) {
-    list.appendChild(emptyState(
-      query ? "No matches" : "No flagged replies",
-      query ? "Try a different word from the question or the reply." : "If the site ever filters a reply, you'll find it here."
-    ));
+  .msg { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; margin-bottom: 9px; overflow: hidden; }
+  .msg.flagged { border-color: var(--warn-line); }
+
+  .q { padding: 10px 13px 11px; background: var(--you-bg); }
+  .a { padding: 10px 13px 3px; border-left: 3px solid var(--accent); }
+  .flagged .a { border-left-color: var(--warn-line); }
+
+  .who { font-size: 12px; font-weight: 650; color: var(--muted); }
+  .who::before {
+    content: ""; display: inline-block; width: 6px; height: 6px; margin-right: 6px;
+    border-radius: 50%; background: currentColor; opacity: .5; vertical-align: 1px;
   }
-  sc.scrollTop = y;
-}
+  .who.ai { color: var(--accent-ink); }
+  .a-head { display: flex; align-items: center; gap: 8px; }
+  .time { margin-left: auto; font-size: 12px; color: var(--muted); }
+  .live { font-size: 12px; color: var(--accent-ink); }
+  .live::before {
+    content: ""; display: inline-block; width: 6px; height: 6px; margin-right: 5px;
+    border-radius: 50%; background: var(--accent); vertical-align: 1px;
+    animation: pulse 1.2s ease-in-out infinite;
+  }
+  @keyframes pulse { 50% { opacity: 0.25; } }
+  @media (prefers-reduced-motion: reduce) { .live::before { animation: none; } }
 
-/* ---------- events ---------- */
+  .text { margin: 4px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .q .text { margin-top: 2px; }
+  .clamp .text { display: -webkit-box; -webkit-box-orient: vertical; overflow: hidden; }
+  .clamp .q .text { -webkit-line-clamp: 3; }
+  .clamp .a .text { -webkit-line-clamp: 5; }
+  .placeholder { color: var(--muted); font-style: italic; }
 
-$("#q").addEventListener("input", function (e) {
-  query = norm(e.target.value.trim());
-  render();
-});
+  .more { padding: 0; margin: 3px 0 5px; border: 0; background: none; color: var(--accent-ink); font-size: 13px; }
+  .more:hover { text-decoration: underline; }
 
-document.querySelectorAll(".chip").forEach(function (c) {
-  c.addEventListener("click", function () {
-    filter = c.dataset.f;
-    render();
-  });
-});
+  .notice { margin: 9px 0 5px; padding: 7px 10px; border-radius: 8px; background: var(--warn-bg); color: var(--warn); font-size: 13px; }
 
-$("#open-tab").addEventListener("click", function () {
-  browser.tabs.create({ url: browser.runtime.getURL("popup.html?tab=1") });
-  window.close();
-});
+  details.think { margin: 7px 0 5px; }
+  details.think summary { cursor: pointer; color: var(--muted); font-size: 13px; width: max-content; }
+  details.think summary:hover { color: var(--accent-ink); }
+  .think-body { margin: 7px 0 5px; padding-left: 11px; border-left: 2px solid var(--line); color: var(--muted); font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; }
 
-$("#export-all").addEventListener("click", function () {
-  const valid = records.filter(function (r) { return r.fragments && r.fragments.length; });
-  if (!valid.length) return;
-  const md = buildGroups(valid).map(groupMd).join("\n");
-  download("deepseek-saver-" + new Date().toISOString().slice(0, 10) + ".md", md);
-});
+  .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; padding: 7px 10px 10px; }
 
-armable($("#clear"), "Delete all", function () {
-  browser.runtime.sendMessage({ cmd: "clear" });
-});
-
-async function load() {
-  const r = await browser.storage.local.get("records");
-  records = r.records || [];
-  render();
-}
-
-browser.storage.onChanged.addListener(function (changes) {
-  if (changes.records) load();
-});
-load();
+  .empty { padding: 44px 20px; text-align: center; color: var(--muted); }
+  .empty strong {
+    display: block; color: var(--ink); font-size: 16px; margin-bottom: 5px;
+    font-family: ui-serif, Georgia, "Iowan Old Style", "Palatino Linotype", serif; font-weight: 600;
+  }
+</style>
+</head>
+<body>
+  <header>
+    <div class="wrap">
+      <div class="bar">
+        <h1>DeepSeek Saver</h1>
+        <div class="bar-actions">
+          <button id="open-tab" class="ghost" title="Open in a bigger window">Open in tab</button>
+          <button id="export-all" class="ghost">Download all</button>
+          <button id="clear" class="ghost danger">Delete all</button>
+        </div>
+      </div>
+      <input id="q" type="search" placeholder="Search your conversations" aria-label="Search">
+      <div class="chips">
+        <button class="chip" data-f="all" aria-pressed="true">All<span class="n" id="n-all">0</span></button>
+        <button class="chip" data-f="flagged" aria-pressed="false">Flagged<span class="n" id="n-flagged">0</span></button>
+      </div>
+    </div>
+  </header>
+  <main id="scroll">
+    <div class="wrap" id="list"></div>
+  </main>
+  <script src="popup.js"></script>
+</body>
+</html>
